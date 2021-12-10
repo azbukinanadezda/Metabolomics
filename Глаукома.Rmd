@@ -1,0 +1,601 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+library(mixOmics)
+library(reshape2)
+library(Stack)
+library(EnhancedVolcano)
+library(tidyverse)
+library(ggpubr)
+library(rstatix)
+library(broom)
+```
+```{r}
+df <-read.csv("../Январь 2020/joined2.csv",sep = ';',check.names = FALSE)
+df$Storage = as.factor(df$Storage)
+#df$Letter_factor = as.numeric(df$Letter_factor)
+df[1:5,]
+#View(df)
+```
+
+
+
+Look only on AH first
+```{r}
+dfah = df[df$Liquid == 'AH',]
+#old_names = names(dfah)[13:length(dfah)]
+#names(dfah)[13:length(dfah)] = c(1:(length(dfah)-13))
+#dfah
+```
+View DEG
+```{r}
+# Здесь попытка построить линейную модель с учетом всех ковариат, для некоторых соединений ее
+#нельзя построить, так как они встречаются не во всех образцах (эти соединения будут напечатаны)
+results <- data.frame()
+
+# loop through the scales and each variable
+
+for(var in names(dfah)[13:length(dfah)]){
+  
+        # dynamically generate formula
+      fmla <- as.formula(paste0("`",var,"` ~ Glaucoma+Sex+Age+Storage"))
+      #print(fmla)
+    
+      # fit glm model
+      fit <- try( glm(fmla, data=dfah))
+      if(inherits(fit, "try-error"))
+      {print(fmla)
+        next}
+
+        ## capture summary stats
+      intercept <- coef(summary(fit))[1]
+      slope <- coef(summary(fit))[2]
+      p.value <- coef(summary(fit))[2,4]
+      AIC <- AIC(fit)
+      Deviance <- deviance(fit)
+
+        # get coefficents of fit
+      cfit <- coef(summary(fit))
+
+        # create temporary data frame
+      df <- data.frame(var = var, intercept = intercept,
+                         slope = slope, p.value = p.value,
+                         stringsAsFactors = F)
+
+        # bind rows of temporary data frame to the results data frame
+      results <- rbind(results, df)
+    }
+
+
+      
+```
+```{r} 
+#Далее для тех соединений, где случился неуспех, убираем какую-то из ковариат и пробуем 
+fit <- try( glm(`12,13-EpOME` ~ Glaucoma + Age + Storage, data=dfah))
+summary(fit)
+intercept <- coef(summary(fit))[1]
+slope <- coef(summary(fit))[2]
+p.value <- coef(summary(fit))[2,4]
+df <- data.frame(var = "12,13-EpOME", intercept = intercept,
+                         slope = slope, p.value = p.value,
+                         stringsAsFactors = F)
+
+        # bind rows of temporary data frame to the results data frame
+results <- rbind(results, df)
+#results      
+```
+```{r}
+fit <- try( glm(`9-HOTrE` ~ Age, data=dfah))
+summary(fit)
+intercept <- coef(summary(fit))[1]
+slope <- coef(summary(fit))[2]
+p.value <- coef(summary(fit))[2,4]
+df <- data.frame(var = "9-HOTrE", intercept = intercept,
+                         slope = slope, p.value = p.value,
+                         stringsAsFactors = F)
+
+        # bind rows of temporary data frame to the results data frame
+results <- rbind(results, df)
+```
+```{r}
+fit <- try( glm(TXB3 ~ Glaucoma + Age, data=dfah))
+summary(fit)
+intercept <- coef(summary(fit))[1]
+slope <- coef(summary(fit))[2]
+p.value <- coef(summary(fit))[2,4]
+df <- data.frame(var = "TXB3", intercept = intercept,
+                         slope = slope, p.value = p.value,
+                         stringsAsFactors = F)
+
+        # bind rows of temporary data frame to the results data frame
+results <- rbind(results, df)
+```
+```{r}
+#Считаем log2FC для средних в одной и в другой группе. 
+X1 = dfah[dfah$Glaucoma == 'Glaucoma',][,13: 33]*100 #умножила на 100, чтобы было точнее вычисления (числа небольшие)
+X2 = dfah[dfah$Glaucoma != 'Glaucoma',][,13: 33]*100
+illmean <- apply(X1,2,function(x)mean(x,na.rm=TRUE))
+HCmean <- apply(X2,2,function(x)mean(x,na.rm=TRUE))
+log2fc <-data.frame(log2(illmean/HCmean))
+
+rownames(results)<-results$var
+dfvolcano = merge(log2fc, results, by=0, all=TRUE) 
+dfvolcano = dfvolcano[complete.cases(dfvolcano), ]
+row.names(dfvolcano) <- NULL
+```
+
+```{r fig.width = 4.5,fig.height = 3}
+#У этого пакета просто куча кучная параметров, чтобы строить красивые картинки вулкано плота, читайте описание к нему!
+EnhancedVolcano(dfvolcano,
+                lab = dfvolcano$var,
+                x = 'log2.illmean.HCmean.', y = 'p.value', pCutoff = 0.05/22,#делим pCutOff на число переменных
+                FCcutoff = 1,
+                ylim = c(0, 5), pointSize = 5,xlim = c(-2, 2))
+```
+PLS-DA все по всему
+
+```{r}
+X <-dfah[,13: 33]*100
+#View(X)
+#нормируем центрируем
+my_scale <- function(t) {
+    apply(t, 2, function(x) {
+        (x - mean(x, na.rm=TRUE))/sd(x, na.rm=TRUE)
+    }) 
+}
+Xnorm <- my_scale(X)
+Y <- dfah$Glaucoma_factor #должны быть метки классов цифры! (1 2 3 4)
+```
+
+
+```{r}
+#сначала ставим много компонент и проводим валидацию
+srbct.plsda <- plsda(Xnorm, Y, ncomp = 8)
+set.seed(2543)
+
+perf.plsda.srbct <- perf(srbct.plsda, validation = "loo", 
+                         progressBar = T, auc = TRUE, nrepeat = 1) 
+#prefomance, cross-validation, leave one out
+# for reproducibility, only when the `cpus' argument is not used
+
+plot(perf.plsda.srbct, col = color.mixo(5:7), sd = TRUE, legend.position = "vertical")
+#по графику ошибок определяем, какое число компонент самое оптимальное
+```
+```{r}
+#строим с этим числом компонент
+srbct.plsda <- plsda(Xnorm, Y, ncomp = 3)  # set ncomp to 10 for performance assessment later
+
+plotIndiv(srbct.plsda , comp = 1:2, group = dfah$Glaucoma, ind.names = FALSE, 
+          ellipse = TRUE, legend = TRUE, title = 'PLS-DA')
+
+```
+```{r}
+#выбираем важные переменные
+linn.vip <- vip(srbct.plsda)
+names_vip <-rownames(linn.vip)
+linn.vip <-data.frame(linn.vip)
+rownames(linn.vip)<-names_vip
+linn.vip$var<-rownames(linn.vip)
+linn.vip %>% filter(comp1>1.5 | comp2>1.5| comp3>1.5)
+#rownames(linn.vip %>% filter(comp1>1.5 | comp2>1.5| comp3>1.5))
+```
+PLS DA стадии глаукомы
+```{r}
+dfglauah = dfah[dfah$Glaucoma == 'Glaucoma',]
+X <-dfglauah[,13: 33]*100
+#View(X)
+my_scale <- function(t) {
+    apply(t, 2, function(x) {
+        (x - mean(x, na.rm=TRUE))/sd(x, na.rm=TRUE)
+    }) 
+}
+Xnorm <- my_scale(X)
+rownames(Xnorm) <-NULL
+Y <- as.numeric(dfglauah$Stage)
+```
+
+```{r}
+srbct.plsda <- plsda(Xnorm, Y, ncomp = 8)
+set.seed(2543)
+
+perf.plsda.srbct <- perf(srbct.plsda, validation = "loo", 
+                         progressBar = T, auc = TRUE, nrepeat = 1) 
+#prefomance, cross-validation, leave one out
+# for reproducibility, only when the `cpus' argument is not used
+
+plot(perf.plsda.srbct, col = color.mixo(5:7), sd = TRUE, legend.position = "vertical")
+```
+```{r}
+srbct.plsda <- plsda(Xnorm, Y, ncomp = 4)  # set ncomp to 10 for performance assessment later
+
+plotIndiv(srbct.plsda , comp = 1:2, group = Y, ind.names = FALSE, 
+          ellipse = TRUE, legend = TRUE, title = 'PLS-DA')
+
+```
+
+
+
+```{r}
+linn.vip <- vip(srbct.plsda)
+names_vip <-rownames(linn.vip)
+linn.vip <-data.frame(linn.vip)
+rownames(linn.vip)<-names_vip
+linn.vip$var<-rownames(linn.vip)
+linn.vip %>% filter(comp1>1.5 | comp2>1.5| comp3>1.5)
+#rownames(linn.vip %>% filter(comp1>1.5 | comp2>1.5| comp3>1.5))
+```
+PLS-DA по тяжести
+```{r}
+Y <- as.numeric(dfglauah$Letter_factor)
+srbct.plsda <- plsda(Xnorm, Y, ncomp = 8)
+set.seed(2543)
+
+perf.plsda.srbct <- perf(srbct.plsda, validation = "loo", 
+                         progressBar = T, auc = TRUE, nrepeat = 1) 
+#prefomance, cross-validation, leave one out
+# for reproducibility, only when the `cpus' argument is not used
+
+plot(perf.plsda.srbct, col = color.mixo(5:7), sd = TRUE, legend.position = "vertical")
+
+```
+```{r}
+srbct.plsda <- plsda(Xnorm, Y, ncomp = 6)  # set ncomp to 10 for performance assessment later
+
+plotIndiv(srbct.plsda , comp = 1:2, group = Y, ind.names = FALSE, 
+          ellipse = TRUE, legend = TRUE, title = 'PLS-DA')
+```
+ 
+```{r}
+linn.vip <- vip(srbct.plsda)
+names_vip <-rownames(linn.vip)
+linn.vip <-data.frame(linn.vip)
+rownames(linn.vip)<-names_vip
+linn.vip$var<-rownames(linn.vip)
+linn.vip %>% filter(comp1>1.5 | comp2>1.5| comp3>1.5)
+#rownames(linn.vip %>% filter(comp1>1.5 | comp2>1.5| comp3>1.5))
+```
+Кластеризация
+```{r}
+library(biclust)
+```
+
+```{r}
+X <-dfah[,13: 33]*100
+#View(X)
+my_scale <- function(t) {
+    apply(t, 2, function(x) {
+        (x - mean(x, na.rm=TRUE))/sd(x, na.rm=TRUE)
+    }) 
+}
+Xnorm <- my_scale(X)
+Y <- dfah$Glaucoma_factor
+
+
+Xmotif<-biclust(Xnorm, method=BCXmotifs(),number=10, alpha=0.05)
+Xmotif
+```
+```{r}
+library(biclustermd)
+```
+```{r}
+X <-dfah[,13: 33]*100
+#View(X)
+my_scale <- function(t) {
+    apply(t, 2, function(x) {
+        (x - mean(x, na.rm=TRUE))/sd(x, na.rm=TRUE)
+    }) 
+}
+Xnorm <- my_scale(X)
+Y <- dfah$Glaucoma_factor
+```
+```{r}
+clust <- biclustermd(Xnorm, row_clusters = 2,
+similarity = "Jaccard",
+miss_val_sd = sd(Xnorm, na.rm = TRUE), col_min_num = 3,
+row_min_num = 3)
+```
+```{r}
+autoplot(clust, reorder = TRUE, transform_colors = TRUE, c = 1/15)+ scale_fill_viridis_c(na.value = 'white') +
+  labs(x = "Metabolites",
+     y = "Patient Status",
+     fill = "Concentration")
+```
+```{r}
+clust_df = row.names(clust) 
+rownames(clust_df) <- clust_df$row_name
+```
+```{r}
+clust_df = merge(clust_df, dfah,by=0)
+```
+```{r}
+clust_df[order(clust_df$row_cluster,clust_df$Sex, clust_df$Glaucoma), ]
+```
+```{r}
+clust_df %>% group_by(row_cluster, Stage) %>% tally()
+```
+Look only on TF 
+```{r}
+dfah = df[df$Liquid == 'TF',]
+#old_names = names(dfah)[13:length(dfah)]
+#names(dfah)[13:length(dfah)] = c(1:(length(dfah)-13))
+#dfah
+```
+View DEG
+```{r}
+results <- data.frame()
+
+# loop through the scales and each variable
+
+for(var in names(dfah)[13:length(dfah)]){
+  
+        # dynamically generate formula
+      fmla <- as.formula(paste0("`",var,"` ~ Glaucoma+Sex+Age+Storage"))
+      #print(fmla)
+    
+      # fit glm model
+      fit <- try( glm(fmla, data=dfah))
+      if(inherits(fit, "try-error"))
+      {print(fmla)
+        next}
+
+        ## capture summary stats
+      intercept <- coef(summary(fit))[1]
+      slope <- coef(summary(fit))[2]
+      p.value <- coef(summary(fit))[2,4]
+      AIC <- AIC(fit)
+      Deviance <- deviance(fit)
+
+        # get coefficents of fit
+      cfit <- coef(summary(fit))
+
+        # create temporary data frame
+      df <- data.frame(var = var, intercept = intercept,
+                         slope = slope, p.value = p.value,
+                         stringsAsFactors = F)
+
+        # bind rows of temporary data frame to the results data frame
+      results <- rbind(results, df)
+    }
+
+
+      
+```
+#exceptions with 3 compounds 
+```{r}
+fit <- try( glm(`20-HETE` ~ Glaucoma , data=dfah))
+summary(fit)
+intercept <- coef(summary(fit))[1]
+slope <- coef(summary(fit))[2]
+p.value <- coef(summary(fit))[2,4]
+df <- data.frame(var = "20-HETE", intercept = intercept,
+                         slope = slope, p.value = p.value,
+                         stringsAsFactors = F)
+
+        # bind rows of temporary data frame to the results data frame
+results <- rbind(results, df)
+#results      
+```
+```{r}
+fit <- try( glm(`20-carboxy-LTB4` ~ Glaucoma+Age, data=dfah))
+summary(fit)
+intercept <- coef(summary(fit))[1]
+slope <- coef(summary(fit))[2]
+p.value <- coef(summary(fit))[2,4]
+df <- data.frame(var = "20-carboxy-LTB4", intercept = intercept,
+                         slope = slope, p.value = p.value,
+                         stringsAsFactors = F)
+
+        # bind rows of temporary data frame to the results data frame
+results <- rbind(results, df)
+```
+```{r}
+fit <- try( glm(TXB3 ~ Glaucoma + Age, data=dfah))
+summary(fit)
+intercept <- coef(summary(fit))[1]
+slope <- coef(summary(fit))[2]
+p.value <- coef(summary(fit))[2,4]
+df <- data.frame(var = "TXB3", intercept = intercept,
+                         slope = slope, p.value = p.value,
+                         stringsAsFactors = F)
+
+        # bind rows of temporary data frame to the results data frame
+results <- rbind(results, df)
+```
+
+```{r}
+X1 = dfah[dfah$Glaucoma == 'Glaucoma',][,13: 33]*100
+X2 = dfah[dfah$Glaucoma != 'Glaucoma',][,13: 33]*100
+illmean <- apply(X1,2,function(x)mean(x,na.rm=TRUE))
+HCmean <- apply(X2,2,function(x)mean(x,na.rm=TRUE))
+log2fc <-data.frame(log2(illmean/HCmean))
+
+rownames(results)<-results$var
+dfvolcano = merge(log2fc, results, by=0, all=TRUE) 
+dfvolcano = dfvolcano[complete.cases(dfvolcano), ]
+row.names(dfvolcano) <- NULL
+```
+
+```{r fig.width = 4,fig.height = 4}
+EnhancedVolcano(dfvolcano,
+                lab = dfvolcano$var,
+                x = 'log2.illmean.HCmean.', y = 'p.value', pCutoff = 0.05/10,
+                FCcutoff = 1,
+                ylim = c(0, 5), pointSize = 5,xlim = c(-2, 2))
+```
+PLS-DA все по всему
+
+```{r}
+X <-dfah[,13: 33]*100
+#View(X)
+my_scale <- function(t) {
+    apply(t, 2, function(x) {
+        (x - mean(x, na.rm=TRUE))/sd(x, na.rm=TRUE)
+    }) 
+}
+Xnorm <- my_scale(X)
+Y <- dfah$Glaucoma_factor
+```
+
+
+```{r}
+srbct.plsda <- plsda(Xnorm, Y, ncomp = 8)
+set.seed(2543)
+
+perf.plsda.srbct <- perf(srbct.plsda, validation = "loo", 
+                         progressBar = T, auc = TRUE, nrepeat = 1) 
+#prefomance, cross-validation, leave one out
+# for reproducibility, only when the `cpus' argument is not used
+
+plot(perf.plsda.srbct, col = color.mixo(5:7), sd = TRUE, legend.position = "vertical")
+```
+```{r}
+srbct.plsda <- plsda(Xnorm, Y, ncomp = 4)  # set ncomp to 4
+
+plotIndiv(srbct.plsda , comp = 1:2, group = dfah$Glaucoma, ind.names = FALSE, 
+          ellipse = TRUE, legend = TRUE, title = 'PLS-DA')
+
+```
+```{r}
+linn.vip <- vip(srbct.plsda)
+names_vip <-rownames(linn.vip)
+linn.vip <-data.frame(linn.vip)
+rownames(linn.vip)<-names_vip
+linn.vip$var<-rownames(linn.vip)
+linn.vip %>% filter(comp1>1.5 | comp2>1.5| comp3>1.5| comp4>1.5)
+#rownames(linn.vip %>% filter(comp1>1.5 | comp2>1.5| comp3>1.5))
+```
+PLS DA стадии глаукомы
+```{r}
+dfglauah = dfah[dfah$Glaucoma == 'Glaucoma',]
+X <-dfglauah[,13: 33]*100
+#View(X)
+my_scale <- function(t) {
+    apply(t, 2, function(x) {
+        (x - mean(x, na.rm=TRUE))/sd(x, na.rm=TRUE)
+    }) 
+}
+Xnorm <- my_scale(X)
+rownames(Xnorm) <-NULL
+Y <- as.numeric(dfglauah$Stage)
+```
+
+```{r}
+srbct.plsda <- plsda(Xnorm, Y, ncomp = 8)
+set.seed(2543)
+
+perf.plsda.srbct <- perf(srbct.plsda, validation = "loo", 
+                         progressBar = T, auc = TRUE, nrepeat = 1) 
+#prefomance, cross-validation, leave one out
+# for reproducibility, only when the `cpus' argument is not used
+
+plot(perf.plsda.srbct, col = color.mixo(5:7), sd = TRUE, legend.position = "vertical")
+```
+```{r}
+srbct.plsda <- plsda(Xnorm, Y, ncomp = 4)  # set ncomp to 10 for performance assessment later
+
+plotIndiv(srbct.plsda , comp = 1:2, group = Y, ind.names = FALSE, 
+          ellipse = TRUE, legend = TRUE, title = 'PLS-DA')
+
+```
+
+
+
+```{r}
+linn.vip <- vip(srbct.plsda)
+names_vip <-rownames(linn.vip)
+linn.vip <-data.frame(linn.vip)
+rownames(linn.vip)<-names_vip
+linn.vip$var<-rownames(linn.vip)
+linn.vip %>% filter(comp1>1.5 | comp2>1.5| comp3>1.5)
+#rownames(linn.vip %>% filter(comp1>1.5 | comp2>1.5| comp3>1.5))
+```
+PLS-DA по тяжести
+```{r}
+Y <- as.numeric(dfglauah$Letter_factor)
+srbct.plsda <- plsda(Xnorm, Y, ncomp = 8)
+set.seed(2543)
+
+perf.plsda.srbct <- perf(srbct.plsda, validation = "loo", 
+                         progressBar = T, auc = TRUE, nrepeat = 1) 
+#prefomance, cross-validation, leave one out
+# for reproducibility, only when the `cpus' argument is not used
+
+plot(perf.plsda.srbct, col = color.mixo(5:7), sd = TRUE, legend.position = "vertical")
+
+```
+```{r}
+srbct.plsda <- plsda(Xnorm, Y, ncomp = 2)  # set ncomp to 10 for performance assessment later
+
+plotIndiv(srbct.plsda , comp = 1:2, group = Y, ind.names = FALSE, 
+          ellipse = TRUE, legend = TRUE, title = 'PLS-DA')
+```
+ 
+```{r}
+linn.vip <- vip(srbct.plsda)
+names_vip <-rownames(linn.vip)
+linn.vip <-data.frame(linn.vip)
+rownames(linn.vip)<-names_vip
+linn.vip$var<-rownames(linn.vip)
+linn.vip %>% filter(comp1>1.5 | comp2>1.5)
+#rownames(linn.vip %>% filter(comp1>1.5 | comp2>1.5| comp3>1.5))
+```
+Кластеризация
+
+
+
+```{r}
+library(biclustermd)
+```
+```{r}
+X <-dfah[,13: 33]*100
+#View(X)
+my_scale <- function(t) {
+    apply(t, 2, function(x) {
+        (x - mean(x, na.rm=TRUE))/sd(x, na.rm=TRUE)
+    }) 
+}
+Xnorm <- my_scale(X)
+Y <- dfah$Glaucoma_factor
+```
+```{r}
+clust <- biclustermd(Xnorm, row_clusters = 2,
+similarity = "Jaccard",
+miss_val_sd = sd(Xnorm, na.rm = TRUE), col_min_num = 3,
+row_min_num = 3)
+```
+```{r}
+autoplot(clust, reorder = TRUE, transform_colors = TRUE, c = 1/15)+ scale_fill_viridis_c(na.value = 'white') +
+  labs(x = "Metabolites",
+     y = "Patient Status",
+     fill = "Concentration")
+```
+```{r}
+clust_df = row.names(clust) 
+rownames(clust_df) <- clust_df$row_name
+```
+```{r}
+clust_df = merge(clust_df, dfah,by=0)
+```
+```{r}
+clust_df[order(clust_df$row_cluster,clust_df$Sex, clust_df$Glaucoma), ]
+```
+```{r}
+clust_df %>% group_by(row_cluster, Stage) %>% tally()
+```
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
